@@ -1,0 +1,6 @@
+{
+  "name": "MediPaisa AI",
+  "description": "AI-powered healthcare expense management and financial planning application for Indian families. Track medical spending, analyze bills with OCR, plan budgets, and get actionable financial insights.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
