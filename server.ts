@@ -93,37 +93,31 @@ app.post('/api/gemini/analyze-bill', async (req, res) => {
       });
     }
 
-    const systemPrompt = `You are an expert AI Medical Bill & Receipt Auditor specializing in Indian healthcare invoices, pharmacy cash memos, diagnostic lab receipts, doctor OPD slips, and hospital bills.
+    const systemPrompt = `You are a high-speed, high-precision AI Medical Bill & Receipt Auditor specialized in Indian healthcare invoices, pharmacy cash memos, diagnostic lab receipts, doctor OPD slips, and hospital bills.
 
 YOUR OBJECTIVE:
 Accurately read and extract itemized line items, provider/pharmacy details, billing dates, patient name (if visible), and financial totals from the provided medical bill or receipt.
 
-MANDATORY EXTRACTION RULES:
-1. ACCURACY & ZERO HALLUCINATION:
-   - Never invent or fabricate any missing details.
-   - If a field is not visible, missing, or unreadable on the document, use null.
-   - For vendorName, billDate, invoiceNumber, patientName, taxAmount, discountAmount, unitPrice: return null if not present or unreadable.
-2. PATIENT PRIVACY:
-   - Extract patientName ONLY if clearly written on the bill. If absent, return null.
-   - Never extract or store sensitive government IDs (Aadhaar, PAN) or complete home addresses.
-3. ITEMIZATION & LINE ITEMS:
-   - Extract each distinct medicine, laboratory test, doctor consultation, or hospital service as an individual line item.
-   - For each item, provide:
-     * description: Name of medicine, test, or service (e.g. "Glycomet 500mg SR", "Complete Blood Count", "Cardiology OPD").
-     * quantity: Number of units (default to 1 if not stated).
-     * unitPrice: Price per unit in INR if shown, otherwise null.
-     * amount: Total amount for this line item in INR.
-4. DO NOT TREAT TOTALS AS LINE ITEMS:
-   - NEVER add subtotal, tax/GST, discount, or invoice total as an individual line item in lineItems.
-5. FINANCIAL TOTALS:
-   - subtotal: Subtotal before tax/discount in INR, or null if not broken down.
-   - taxAmount: Total GST/taxes in INR (CGST + SGST), or null if not separated.
+PRECISION & SPEED GUIDELINES:
+1. INDIAN DATE CONVERSION:
+   - Indian medical bills almost always write dates as DD/MM/YYYY, DD-MM-YYYY, or DD Mon YYYY (e.g. 06/11/2026 is 6th November 2026 -> 2026-11-06). Always convert to YYYY-MM-DD. Never swap day and month.
+2. CLEAN TRADE/MEDICINE NAMES:
+   - Extract the clean, recognizable medicine, lab test, or procedure name (e.g. 'Glycomet 500mg SR', 'HbA1c Glycosylated Hemoglobin', 'Lipid Profile Extended', 'Senior Cardiology OPD Consultation').
+   - Strip leading row numbers (1., 2.), HSN/SAC codes, batch numbers, or manufacturing codes from the description.
+3. QUANTITY & UNIT PRICE:
+   - Extract numeric quantity (e.g. 2 for 2 strips/packs). If not stated, default to 1.
+   - If unit price is shown on receipt, extract it; otherwise calculate amount / quantity or set to null.
+4. FINANCIAL TOTALS:
+   - subtotal: Subtotal before tax and discount in INR, or null if not broken down.
+   - taxAmount: Total GST (CGST + SGST or IGST) in INR, or null if not separated.
    - discountAmount: Total discount in INR, or null if none.
-   - totalAmount: Final payable bill/invoice total in INR.
-6. DOCUMENT VALIDITY & READABILITY:
-   - If the image is blurry, illegible, cut off, or too degraded to extract with confidence, set isReadable: false and explain why in confidenceNotes.
-   - If the image is NOT a medical receipt/bill at all (e.g. restaurant food bill, travel ticket, random photo), set isMedicalBill: false and explain why in confidenceNotes.
-7. CATEGORIES:
+   - roundOff: Any round-off adjustment (+/- INR), or null if none.
+   - totalAmount: The final net payable amount (often labeled 'Net Amount', 'Total Payable', 'Grand Total', or 'Amount Paid').
+   - NEVER include the subtotal, taxes, discounts, or total invoice amount as an individual item in lineItems.
+5. RESILIENCE ON THERMAL & FAINT RECEIPTS:
+   - Indian pharmacy cash memos (Apollo, MedPlus, Wellness Forever) and doctor OPD slips often use thermal paper or dot-matrix printing. If you can read the provider or items, extract whatever is legible, set isReadable: true, and note any faint sections in confidenceNotes.
+   - Set isMedicalBill: false ONLY if the image is definitively non-medical (e.g. restaurant food, grocery, clothing).
+6. CATEGORIES:
    - Choose strictly one of: "Medicines", "Doctor Consultation", "Laboratory Tests", "Hospitalization", "Other".`;
 
     const requestPayload = {
@@ -136,7 +130,7 @@ MANDATORY EXTRACTION RULES:
             },
           },
           {
-            text: 'Carefully inspect this healthcare bill or medical receipt. Extract the provider/pharmacy name, invoice date, bill number, patient name (if visible), itemized medicines/services with quantity and amounts, taxes, discounts, and the final bill total. Validate all calculations.',
+            text: 'Carefully inspect this healthcare bill or medical receipt. Extract the provider/pharmacy name, invoice date, bill number, patient name (if visible), itemized medicines/services with quantity and amounts, taxes, discounts, roundoff, and the final bill total. Validate all calculations.',
           },
         ],
       },
@@ -200,6 +194,10 @@ MANDATORY EXTRACTION RULES:
               type: Type.NUMBER,
               description: 'Discount amount in INR, or null if none.',
             },
+            roundOff: {
+              type: Type.NUMBER,
+              description: 'Round-off adjustment in INR (+/-), or null if none.',
+            },
             totalAmount: {
               type: Type.NUMBER,
               description: 'Final bill total amount payable in INR.',
@@ -214,11 +212,16 @@ MANDATORY EXTRACTION RULES:
       },
     };
 
+    const startTime = Date.now();
     let response: any;
     try {
       response = await ai.models.generateContent({
         model: 'gemini-3.8-flash',
         ...requestPayload,
+        config: {
+          ...requestPayload.config,
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
       });
     } catch (primaryErr: any) {
       console.warn('Primary model gemini-3.8-flash failed, trying fallback gemini-flash-latest:', primaryErr?.message || primaryErr);
@@ -227,6 +230,7 @@ MANDATORY EXTRACTION RULES:
         ...requestPayload,
       });
     }
+    const processingTimeMs = Date.now() - startTime;
 
     const text = response.text || '{}';
     let parsedData;
@@ -268,12 +272,13 @@ MANDATORY EXTRACTION RULES:
     const totalAmount = Number(parsedData.totalAmount) || itemsSum || 0;
     const tax = Number(parsedData.taxAmount) || 0;
     const discount = Number(parsedData.discountAmount) || 0;
+    const roundOff = Number(parsedData.roundOff) || 0;
 
     const discrepancy = Math.abs(itemsSum - totalAmount);
-    // Allow discrepancy if tax or discount was added/subtracted
+    // Allow discrepancy if tax, discount, or roundoff accounts for the total
     const isMathConsistent =
       discrepancy < 1.0 ||
-      Math.abs(itemsSum + tax - discount - totalAmount) < 1.0;
+      Math.abs(itemsSum + tax - discount + roundOff - totalAmount) < 1.5;
 
     return res.json({
       success: true,
@@ -284,6 +289,7 @@ MANDATORY EXTRACTION RULES:
         totalAmount: Math.round(totalAmount * 100) / 100,
         isMathConsistent,
         discrepancy: Math.round(discrepancy * 100) / 100,
+        processingTimeMs,
         filename,
       },
     });

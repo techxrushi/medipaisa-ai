@@ -28,6 +28,7 @@ export interface Expense {
     subtotal?: number;
     taxAmount?: number;
     discountAmount?: number;
+    roundOff?: number;
     extractedAt?: string;
     isMathConsistent?: boolean;
   };
@@ -51,12 +52,14 @@ export interface BillAnalysisResult {
   subtotal: number | null;
   taxAmount: number | null;
   discountAmount: number | null;
+  roundOff?: number | null;
   totalAmount: number;
   confidenceNotes: string;
   itemsSum: number;
   isMathConsistent: boolean;
   discrepancy: number;
   filename?: string;
+  processingTimeMs?: number;
 }
 
 export interface ChatMessage {
